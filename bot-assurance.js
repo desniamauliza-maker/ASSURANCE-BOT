@@ -747,7 +747,7 @@ bot.on('message', async (msg) => {
           const existingInc = (orderData[i][orderCols.incident] || '').trim().toUpperCase();
           if (existingInc === tiket.incident.toUpperCase()) {
             console.log(`⚠️ Duplicate incident ${tiket.incident} - skipping`);
-            return sendTelegram(chatId, `⚠️ Incident </b> sudah ada di ORDER ASSURANCE.`, { reply_to_message_id: msgId });
+            return sendTelegram(chatId, `⚠️ Incident <b>${tiket.incident} </b> sudah ada di ORDER ASSURANCE.`, { reply_to_message_id: msgId });
           }
         }
 
