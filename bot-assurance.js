@@ -46,7 +46,7 @@ const TTR_TABLE = {
   'DATIN K3': 7.2,
   'HVC_PLATINUM': 6,
   'HVC_GOLD': 12,
-  'REGULER': 36,
+  'REGULER': 24,
 };
 
 const BULAN_ID = {
@@ -747,7 +747,7 @@ bot.on('message', async (msg) => {
           const existingInc = (orderData[i][orderCols.incident] || '').trim().toUpperCase();
           if (existingInc === tiket.incident.toUpperCase()) {
             console.log(`⚠️ Duplicate incident ${tiket.incident} - skipping`);
-            return sendTelegram(chatId, `⚠️ Incident <b>${tiket.incident}</b> sudah ada di ORDER ASSURANCE.`, { reply_to_message_id: msgId });
+            return sendTelegram(chatId, `⚠️ Incident </b> sudah ada di ORDER ASSURANCE.`, { reply_to_message_id: msgId });
           }
         }
 
@@ -886,7 +886,6 @@ bot.on('message', async (msg) => {
         }
 
         let confirmMsg = `✅ Data Assurance berhasil disimpan!\n\n`;
-        confirmMsg += `<b>Incident:</b> ${parsed.incidentNo}\n`;
         confirmMsg += `<b>Close:</b> ${parsed.closeDesc}\n`;
         if (orderClosed) confirmMsg += `<b>Status ORDER:</b> ✅ Auto-CLOSE | <b>KAWAL TTR:</b> ${kawalTTR}\n`;
 
