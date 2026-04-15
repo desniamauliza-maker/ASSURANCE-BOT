@@ -1670,9 +1670,9 @@ bot.on('message', async (msg) => {
     }
 
     // ============================================================
-    // Handle Pick Up response untuk /TICKET_SQM
+    // Handle Pick Up response untuk /TICKET_SQM (support multi-incident)
     // ============================================================
-    else if (/^INC\d+$/i.test(text) && global.pendingPickup && global.pendingPickup[chatId + '_' + username]) {
+    else if (/INC\d+/i.test(text) && global.pendingPickup && global.pendingPickup[chatId + '_' + username]) {
       try {
         const pending = global.pendingPickup[chatId + '_' + username];
         // Expired after 5 minutes
@@ -1681,22 +1681,37 @@ bot.on('message', async (msg) => {
           return sendTelegram(chatId, '❌ Sesi Pick Up sudah expired. Kirim /TICKET_SQM lagi.', { reply_to_message_id: msgId });
         }
 
-        const incidentNo = text.trim().toUpperCase();
-        const ticket = pending.tickets.find(t => t.incident.toUpperCase() === incidentNo);
-        if (!ticket) {
-          return sendTelegram(chatId, `❌ Incident ${incidentNo} tidak ditemukan di list tiket Anda.`, { reply_to_message_id: msgId });
+        // Extract semua INC dari text (support: "INC123 INC456" atau per baris)
+        const incMatches = text.toUpperCase().match(/INC\d+/g) || [];
+        if (incMatches.length === 0) {
+          return sendTelegram(chatId, '❌ Format INC tidak valid.', { reply_to_message_id: msgId });
         }
 
-        // Update kolom Q (index 16) = PICK UP di SQM SA SIGLI
-        await updateSheetCell(SQM_SHEET, `Q${ticket.row}`, 'PICK UP');
+        const pickedUp = [];
+        const notFound = [];
+
+        for (const incNo of incMatches) {
+          const ticket = pending.tickets.find(t => t.incident.toUpperCase() === incNo);
+          if (ticket) {
+            await updateSheetCell(SQM_SHEET, `Q${ticket.row}`, 'PICK UP');
+            pickedUp.push(ticket);
+          } else {
+            notFound.push(incNo);
+          }
+        }
+
         delete global.pendingPickup[chatId + '_' + username];
 
-        let confirmMsg = `✅ Ticket berhasil di Pick Up!\n\n`;
-        confirmMsg += `📋 Detail:\n`;
-        confirmMsg += `🔹 Incident: ${ticket.incident}\n`;
-        confirmMsg += `📞 Service No: ${ticket.serviceNo}\n`;
-        confirmMsg += `📍 Device: ${ticket.deviceName}\n`;
-        confirmMsg += `📊 Progres: PICK UP`;
+        let confirmMsg = '';
+        if (pickedUp.length > 0) {
+          confirmMsg += `✅ ${pickedUp.length} Ticket berhasil di Pick Up!\n\n`;
+          pickedUp.forEach(t => {
+            confirmMsg += `🔹 ${t.incident} | ${t.serviceNo} | ${t.deviceName}\n`;
+          });
+        }
+        if (notFound.length > 0) {
+          confirmMsg += `\n❌ Tidak ditemukan: ${notFound.join(', ')}`;
+        }
 
         return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
       } catch (err) {
