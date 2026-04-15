@@ -849,7 +849,9 @@ bot.on('message', async (msg) => {
     }
 
     // Skip non-command messages after tiket baru check
-    if (!text.startsWith('/')) return;
+    // Exception: INC pickup response (dari /TICKET_SQM)
+    const hasPendingPickup = global.pendingPickup && global.pendingPickup[chatId + '_' + username] && /INC\d+/i.test(text);
+    if (!text.startsWith('/') && !hasPendingPickup) return;
     // ============================================================
     // /INPUT - Input data assurance + auto-close di ORDER ASSURANCE
     // ============================================================
