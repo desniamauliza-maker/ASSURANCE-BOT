@@ -1478,10 +1478,38 @@ bot.on('message', async (msg) => {
         const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
         if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
 
+        const isAdmin = authResult.role === 'ADMIN';
         const data = await withTimeout(getSheetData(SQM_SHEET, false), 10000);
         if (!data || data.length < 2) return sendTelegram(chatId, '<i>Tidak ada data SQM</i>', { reply_to_message_id: msgId });
 
-        // Cari tiket OPEN milik user berdasarkan username di kolom C
+        // === ADMIN: Tampilkan total per workzone ===
+        if (isAdmin) {
+          let wzMap = {};
+          let totalOpen = 0;
+          for (let i = 1; i < data.length; i++) {
+            const status = (data[i][9] || '').trim().toUpperCase(); // J = Status
+            const wz = (data[i][4] || '').trim().toUpperCase(); // E = Workzone
+            if (status === 'OPEN' && wz) {
+              wzMap[wz] = (wzMap[wz] || 0) + 1;
+              totalOpen++;
+            }
+          }
+
+          let response = `📋 <b>TICKET SQM - OPEN PER WORKZONE</b>\n\n`;
+          if (totalOpen === 0) {
+            response += '<i>Tidak ada tiket OPEN</i>';
+          } else {
+            const entries = Object.entries(wzMap).sort((a, b) => b[1] - a[1]);
+            entries.forEach(([wz, count]) => {
+              response += `📍 <b>${wz}</b> : ${count} tiket\n`;
+            });
+            response += `\n📋 <b>Total: ${totalOpen} tiket OPEN</b>`;
+          }
+
+          return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+        }
+
+        // === USER: Tampilkan tiket OPEN milik user ===
         const userTickets = [];
         for (let i = 1; i < data.length; i++) {
           const teknisi = (data[i][2] || '').trim(); // C = Teknisi
@@ -1530,7 +1558,7 @@ bot.on('message', async (msg) => {
         if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
 
         const inputText = text.replace(/^\/SQM\s*/i, '').trim();
-        if (!inputText) return sendTelegram(chatId, '❌ Silakan kirim data setelah /SQM.', { reply_to_message_id: msgId });
+        if (!inputText) return sendTelegram(chatId, `❌ Format tidak sesuai. Gunakan format:\n\n/SQM INC46230392\nCLOSE: deskripsi perbaikan\nDROPCORE: 0\nPATCHCORD: 0\nSOC: 0\nPSLAVE: 0\nPASSIVE 1/8: 0\nPASSIVE 1/4: 0\nPIGTAIL: 0\nADAPTOR: 0\nROSET: 0\nRJ 45: 0\nLAN: 0`, { reply_to_message_id: msgId });
 
         const parsed = parseAssurance(inputText, username);
         const missing = ['incidentNo', 'closeDesc'].filter(f => !parsed[f]);
