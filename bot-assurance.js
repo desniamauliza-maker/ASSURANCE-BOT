@@ -37,6 +37,8 @@ const sheets = google.sheets({ version: 'v4', auth });
 const ASSURANCE_SHEET = 'PROGRES ASSURANCE';
 const ORDER_ASSURANCE_SHEET = 'ORDER ASSURANCE';
 const MASTER_SHEET = 'MASTER';
+const SQM_SHEET = 'SQM SA SIGLI';
+const MANUAL_GGN_SHEET = 'MANUAL GGN';
 
 const TTR_TABLE = {
   'HVC_DIAMOND': 3,
@@ -45,8 +47,8 @@ const TTR_TABLE = {
   'DATIN K2': 3.6,
   'DATIN K3': 7.2,
   'HVC_PLATINUM': 6,
-  'HVC_GOLD': 24,
-  'REGULER': 24,
+  'HVC_GOLD': 12,
+  'REGULER': 36,
 };
 
 const BULAN_ID = {
@@ -795,6 +797,45 @@ bot.on('message', async (msg) => {
 
         console.log(`✅ Tiket baru recorded at row ${nextRow}: ${tiket.incident} | Teknisi: ${mappedTeknisi} | WZ: ${workzone}`);
 
+        // === GAUL DETECTION: Cek gangguan berulang (Service No sama) ===
+        if (tiket.serviceNo) {
+          try {
+            const prevIncidents = [];
+            for (let i = 1; i < orderData.length; i++) {
+              const existingSN = (orderData[i][orderCols.incident ? 7 : 7] || '').trim(); // H = Service No
+              const existingInc = (orderData[i][orderCols.incident] || '').trim();
+              const existingDate = (orderData[i][0] || '').trim(); // A = Tanggal
+              // Cek kolom H (index 7) untuk Service No
+              const svcNo = (orderData[i][7] || '').trim();
+              if (svcNo === tiket.serviceNo && existingInc && existingInc.toUpperCase() !== tiket.incident.toUpperCase()) {
+                prevIncidents.push({ incident: existingInc, tanggal: existingDate });
+              }
+            }
+
+            if (prevIncidents.length > 0 && GROUP_CHAT_ID) {
+              const admins = await getActiveAdmins();
+              const adminTags = admins.map(a => `@${a}`).join(' ');
+              let gaulMsg = `🔁 GANGGUAN BERULANG TERDETEKSI!\n\n`;
+              gaulMsg += `📞 Service No: ${tiket.serviceNo}\n\n`;
+              gaulMsg += `▸ Tiket Sebelumnya:\n`;
+              prevIncidents.forEach(p => {
+                gaulMsg += `  📅 ${p.tanggal} | ${p.incident}\n`;
+              });
+              gaulMsg += `\n▸ Tiket Baru:\n`;
+              gaulMsg += `  📅 ${tanggal} | ${tiket.incident}\n\n`;
+              gaulMsg += `👷 Teknisi: ${mappedTeknisi}\n`;
+              gaulMsg += `📍 Workzone: ${workzone}\n`;
+              gaulMsg += `👤 Customer: ${tiket.customerType}\n\n`;
+              gaulMsg += `⚠️ Total gangguan: ${prevIncidents.length + 1}x untuk Service No ini\n\n`;
+              if (adminTags) gaulMsg += `cc bg ${adminTags}`;
+              await sendTelegram(GROUP_CHAT_ID, gaulMsg);
+              console.log(`🔁 GAUL detected: ${tiket.serviceNo} (${prevIncidents.length + 1}x)`);
+            }
+          } catch (gaulErr) {
+            console.error('⚠️ GAUL detection error:', gaulErr.message);
+          }
+        }
+
         let confirmMsg = `✅ <b>Data Tiket Baru berhasil disimpan!</b> (Row ${nextRow})\n\n`;
         confirmMsg += `📋 <b>Incident:</b> ${tiket.incident}\n`;
         confirmMsg += `👷 <b>Teknisi:</b> ${mappedTeknisi}\n`;
@@ -1252,6 +1293,391 @@ bot.on('message', async (msg) => {
     }
 
     // ============================================================
+    // /REKAP_JANUARI s/d /REKAP_DESEMBER - Rekap bulan spesifik
+    // ============================================================
+    else if (/^\/REKAP_(JANUARI|FEBRUARI|MARET|APRIL|MEI|JUNI|JULI|AGUSTUS|SEPTEMBER|OKTOBER|NOVEMBER|DESEMBER)\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const bulanMatch = text.match(/^\/REKAP_(\w+)/i);
+        const bulanName = bulanMatch[1].toLowerCase();
+        const targetMonth = BULAN_ID[bulanName];
+        if (!targetMonth) return sendTelegram(chatId, '❌ Bulan tidak valid.', { reply_to_message_id: msgId });
+
+        const data = await withTimeout(getSheetData(ASSURANCE_SHEET), 10000);
+        const orderData = await withTimeout(getSheetData(ORDER_ASSURANCE_SHEET), 10000);
+        const today = getTodayJakarta();
+        let map = {};
+        let incidents = [];
+
+        for (let i = 1; i < data.length; i++) {
+          const tanggal = (data[i][0] || '').trim();
+          const teknisi = (data[i][14] || '-').trim();
+          const incident = (data[i][1] || '').trim();
+          const d = parseIndonesianDate(tanggal);
+          if (!d) continue;
+          if (d.month === targetMonth && d.year === today.year) {
+            map[teknisi] = (map[teknisi] || 0) + 1;
+            if (incident) incidents.push(incident.toUpperCase());
+          }
+        }
+
+        let comply = 0, notComply = 0;
+        for (let i = 1; i < orderData.length; i++) {
+          const inc = (orderData[i][1] || '').trim().toUpperCase();
+          const kawal = (orderData[i][17] || '').trim().toUpperCase();
+          if (incidents.includes(inc)) {
+            if (kawal === 'COMPLY') comply++;
+            else if (kawal === 'NOT COMPLY') notComply++;
+          }
+        }
+
+        const bulanNames = ['', 'JANUARI', 'FEBRUARI', 'MARET', 'APRIL', 'MEI', 'JUNI', 'JULI', 'AGUSTUS', 'SEPTEMBER', 'OKTOBER', 'NOVEMBER', 'DESEMBER'];
+        const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
+        const total = entries.reduce((sum, [_, c]) => sum + c, 0);
+
+        const medal = ['🥇', '🥈', '🥉'];
+        let response = `━━━━━━━━━━━━━━━━━━━━━━\n📊 <b>REKAP CLOSE - ${bulanNames[targetMonth]} ${today.year}</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        if (entries.length === 0) {
+          response += `<i>Belum ada data ${bulanNames[targetMonth].toLowerCase()}</i>`;
+        } else {
+          entries.forEach(([tek, c], i) => {
+            const icon = i < 3 ? medal[i] : '🔸';
+            response += `${icon} <b>${tek}</b> : ${c} tickets\n`;
+          });
+          response += `\n📋 <b>Total: ${total} tickets</b>\n`;
+          response += `✅ COMPLY: ${comply} | ❌ NOT COMPLY: ${notComply}`;
+        }
+
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /REKAP_BULAN Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /MANUAL - Input gangguan manual ke MANUAL GGN
+    // ============================================================
+    else if (/^\/MANUAL\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const inputText = text.replace(/^\/MANUAL\s*/i, '').trim();
+        if (!inputText) {
+          return sendTelegram(chatId, `❌ Format tidak sesuai. Gunakan format:\n\n/MANUAL\nCLOSE: deskripsi perbaikan\nSERVICE NO: 111149103305\nWORKZONE: SLG`, { reply_to_message_id: msgId });
+        }
+
+        const closeMatch = inputText.match(/CLOSE\s*:\s*(.+)/i);
+        const svcMatch = inputText.match(/SERVICE\s*NO\s*:\s*(.+)/i);
+        const wzMatch = inputText.match(/WORKZONE\s*:\s*(.+)/i);
+
+        if (!closeMatch || !svcMatch || !wzMatch) {
+          return sendTelegram(chatId, `❌ Format tidak sesuai. Gunakan format:\n\n/MANUAL\nCLOSE: deskripsi perbaikan\nSERVICE NO: 111149103305\nWORKZONE: SLG`, { reply_to_message_id: msgId });
+        }
+
+        const closeDesc = closeMatch[1].trim();
+        const serviceNo = svcMatch[1].trim();
+        const wz = wzMatch[1].trim().toUpperCase();
+
+        // Get teknisi dari mapping
+        const orderData = await getSheetData(ORDER_ASSURANCE_SHEET, false);
+        const mappings = getWorkzoneMappings(orderData);
+        const teknisi = findMappingTeam(wz, 'OPEN', mappings) || `@${username}`;
+
+        const tanggal = new Date().toLocaleDateString('id-ID', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta',
+        });
+
+        // Simpan ke MANUAL GGN: A=tanggal, B=teknisi, C=(skip), D=workzone, E=serviceNo, F=status
+        const row = [tanggal, teknisi, closeDesc, wz, serviceNo, 'CLOSE'];
+        await withTimeout(appendSheetData(MANUAL_GGN_SHEET, row), 10000);
+
+        let confirmMsg = `✅ Data Gangguan Manual berhasil disimpan!\n\n`;
+        confirmMsg += `📋 Detail:\n`;
+        confirmMsg += `📅 Tanggal: ${tanggal}\n`;
+        confirmMsg += `👷 Teknisi: ${teknisi}\n`;
+        confirmMsg += `📍 Workzone: ${wz}\n`;
+        confirmMsg += `📞 Service No: ${serviceNo}\n`;
+        confirmMsg += `📝 Close: ${closeDesc}\n`;
+        confirmMsg += `📊 Status: CLOSE`;
+
+        return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /MANUAL Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /REKAP_MANUAL - Rekap gangguan manual per bulan
+    // ============================================================
+    else if (/^\/REKAP_MANUAL\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const isAdmin = authResult.role === 'ADMIN';
+        const data = await withTimeout(getSheetData(MANUAL_GGN_SHEET), 10000);
+        const today = getTodayJakarta();
+        const bulanNames = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+        let monthData = {};
+        let grandTotal = 0;
+
+        for (let i = 1; i < data.length; i++) {
+          const tanggal = (data[i][0] || '').trim();
+          const teknisi = (data[i][1] || '').trim();
+          const serviceNo = (data[i][4] || '').trim();
+          const d = parseIndonesianDate(tanggal);
+          if (!d || d.year !== today.year) continue;
+
+          // Filter: user hanya lihat milik sendiri
+          if (!isAdmin && !teknisi.toLowerCase().includes(username.toLowerCase())) continue;
+
+          if (!monthData[d.month]) monthData[d.month] = [];
+          monthData[d.month].push({ tanggal, serviceNo, teknisi });
+          grandTotal++;
+        }
+
+        const sortedMonths = Object.keys(monthData).map(Number).sort((a, b) => a - b);
+        let response = `📋 <b>DETAIL LAPORAN GANGGUAN MANUAL</b>\n📅 Tahun ${today.year}\n\n`;
+
+        if (sortedMonths.length === 0) {
+          response += '<i>Belum ada data</i>';
+        } else {
+          sortedMonths.forEach(month => {
+            const items = monthData[month];
+            response += `📅 <b>${bulanNames[month].toUpperCase()}</b> [${items.length} TIKET]\n`;
+            items.forEach(item => {
+              if (isAdmin) {
+                response += `  ${item.tanggal} | ${item.serviceNo} | ${item.teknisi}\n`;
+              } else {
+                response += `  ${item.tanggal} | ${item.serviceNo}\n`;
+              }
+            });
+            response += '\n';
+          });
+          response += `📋 <b>Grand Total: ${grandTotal} tiket</b>`;
+        }
+
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /REKAP_MANUAL Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /TICKET_SQM - Lihat & Pick Up tiket SQM
+    // ============================================================
+    else if (/^\/TICKET_SQM\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const data = await withTimeout(getSheetData(SQM_SHEET, false), 10000);
+        if (!data || data.length < 2) return sendTelegram(chatId, '<i>Tidak ada data SQM</i>', { reply_to_message_id: msgId });
+
+        // Cari tiket OPEN milik user berdasarkan username di kolom C
+        const userTickets = [];
+        for (let i = 1; i < data.length; i++) {
+          const teknisi = (data[i][2] || '').trim(); // C = Teknisi
+          const status = (data[i][9] || '').trim().toUpperCase(); // J = Status
+          const incident = (data[i][1] || '').trim(); // B = Incident
+          const serviceNo = (data[i][7] || '').trim(); // H = Service No
+          const deviceName = (data[i][8] || '').trim(); // I = Device Name
+
+          if (status === 'OPEN' && teknisi.toLowerCase().includes(username.toLowerCase()) && incident) {
+            userTickets.push({ incident, serviceNo, deviceName, row: i + 1 });
+          }
+        }
+
+        if (userTickets.length === 0) {
+          return sendTelegram(chatId, `📋 Ticket SQM Anda (@${username}):\n\n✅ Tidak ada tiket OPEN saat ini.`, { reply_to_message_id: msgId });
+        }
+
+        const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+        let response = `📋 Ticket SQM Anda (@${username}):\n\n`;
+        userTickets.forEach((t, idx) => {
+          const num = idx < 10 ? numEmoji[idx] : `${idx + 1}.`;
+          response += `${num} ${t.incident} | ${t.serviceNo} | ${t.deviceName}\n`;
+        });
+        response += `\n📌 Total: ${userTickets.length} tiket OPEN\n\nKirim INCIDENT yang ingin di Pick Up:\nContoh: INC46230392`;
+
+        // Simpan state untuk pick up
+        if (!global.pendingPickup) global.pendingPickup = {};
+        global.pendingPickup[chatId + '_' + username] = {
+          tickets: userTickets,
+          timestamp: Date.now(),
+        };
+
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /TICKET_SQM Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /SQM - Input close SQM (mirip /INPUT tapi untuk SQM SA SIGLI)
+    // ============================================================
+    else if (/^\/SQM\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const inputText = text.replace(/^\/SQM\s*/i, '').trim();
+        if (!inputText) return sendTelegram(chatId, '❌ Silakan kirim data setelah /SQM.', { reply_to_message_id: msgId });
+
+        const parsed = parseAssurance(inputText, username);
+        const missing = ['incidentNo', 'closeDesc'].filter(f => !parsed[f]);
+        if (missing.length > 0) return sendTelegram(chatId, `❌ Field wajib: ${missing.join(', ')}`, { reply_to_message_id: msgId });
+
+        // Simpan ke PROGRES ASSURANCE
+        const inputTimestamp = new Date().toLocaleString('id-ID', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          timeZone: 'Asia/Jakarta', hour12: false,
+        });
+        const row = [
+          parsed.dateCreated, parsed.incidentNo,
+          parsed.dropcore, parsed.patchcord, parsed.soc, parsed.pslave,
+          parsed.passive1_8, parsed.passive1_4, parsed.pigtail, parsed.adaptor,
+          parsed.roset, parsed.rj45, parsed.lan, parsed.closeDesc, parsed.teknisi,
+          inputTimestamp,
+        ];
+        await withTimeout(appendSheetData(ASSURANCE_SHEET, row), 10000);
+        cache.assuranceData = null;
+
+        // Auto-close di SQM SA SIGLI
+        let sqmClosed = false;
+        try {
+          const sqmData = await getSheetData(SQM_SHEET, false);
+          for (let i = 1; i < sqmData.length; i++) {
+            const incInSqm = (sqmData[i][1] || '').trim().toUpperCase(); // B = Incident
+            if (incInSqm === parsed.incidentNo) {
+              await updateSheetCell(SQM_SHEET, `J${i + 1}`, 'CLOSE'); // J = Status
+              sqmClosed = true;
+              console.log(`✅ Auto-close SQM: ${parsed.incidentNo} row ${i + 1}`);
+              break;
+            }
+          }
+        } catch (closeErr) {
+          console.error('⚠️ SQM close error:', closeErr.message);
+        }
+
+        let confirmMsg = `✅ Data SQM berhasil disimpan!\n\nClose: ${parsed.closeDesc}`;
+
+        return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /SQM Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /REKAP_SQM - Rekap SQM per bulan (INCIDENT)
+    // ============================================================
+    else if (/^\/REKAP_SQM\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const isAdmin = authResult.role === 'ADMIN';
+        const data = await withTimeout(getSheetData(SQM_SHEET, false), 10000);
+        const today = getTodayJakarta();
+        const bulanNames = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+        let monthData = {};
+        let grandTotal = 0;
+
+        for (let i = 1; i < data.length; i++) {
+          const tanggal = (data[i][0] || '').trim(); // A = Tanggal
+          const incident = (data[i][1] || '').trim(); // B = Incident
+          const teknisi = (data[i][2] || '').trim(); // C = Teknisi
+          const status = (data[i][9] || '').trim().toUpperCase(); // J = Status
+
+          if (status !== 'CLOSE') continue;
+
+          const d = parseIndonesianDate(tanggal);
+          if (!d || d.year !== today.year) continue;
+
+          // Filter: user hanya lihat milik sendiri
+          if (!isAdmin && !teknisi.toLowerCase().includes(username.toLowerCase())) continue;
+
+          if (!monthData[d.month]) monthData[d.month] = [];
+          monthData[d.month].push({ tanggal, incident, teknisi });
+          grandTotal++;
+        }
+
+        const sortedMonths = Object.keys(monthData).map(Number).sort((a, b) => a - b);
+        let response = `📋 <b>DETAIL LAPORAN SQM SA SIGLI</b>\n📅 Tahun ${today.year}\n\n`;
+
+        if (sortedMonths.length === 0) {
+          response += '<i>Belum ada data</i>';
+        } else {
+          sortedMonths.forEach(month => {
+            const items = monthData[month];
+            response += `📅 <b>${bulanNames[month].toUpperCase()}</b> [${items.length} TIKET]\n`;
+            items.forEach(item => {
+              if (isAdmin) {
+                response += `  ${item.tanggal} | ${item.incident} | ${item.teknisi}\n`;
+              } else {
+                response += `  ${item.tanggal} | ${item.incident}\n`;
+              }
+            });
+            response += '\n';
+          });
+          response += `📋 <b>Grand Total: ${grandTotal} tiket</b>`;
+        }
+
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /REKAP_SQM Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // Handle Pick Up response untuk /TICKET_SQM
+    // ============================================================
+    else if (/^INC\d+$/i.test(text) && global.pendingPickup && global.pendingPickup[chatId + '_' + username]) {
+      try {
+        const pending = global.pendingPickup[chatId + '_' + username];
+        // Expired after 5 minutes
+        if (Date.now() - pending.timestamp > 5 * 60 * 1000) {
+          delete global.pendingPickup[chatId + '_' + username];
+          return sendTelegram(chatId, '❌ Sesi Pick Up sudah expired. Kirim /TICKET_SQM lagi.', { reply_to_message_id: msgId });
+        }
+
+        const incidentNo = text.trim().toUpperCase();
+        const ticket = pending.tickets.find(t => t.incident.toUpperCase() === incidentNo);
+        if (!ticket) {
+          return sendTelegram(chatId, `❌ Incident ${incidentNo} tidak ditemukan di list tiket Anda.`, { reply_to_message_id: msgId });
+        }
+
+        // Update kolom Q (index 16) = PICK UP di SQM SA SIGLI
+        await updateSheetCell(SQM_SHEET, `Q${ticket.row}`, 'PICK UP');
+        delete global.pendingPickup[chatId + '_' + username];
+
+        let confirmMsg = `✅ Ticket berhasil di Pick Up!\n\n`;
+        confirmMsg += `📋 Detail:\n`;
+        confirmMsg += `🔹 Incident: ${ticket.incident}\n`;
+        confirmMsg += `📞 Service No: ${ticket.serviceNo}\n`;
+        confirmMsg += `📍 Device: ${ticket.deviceName}\n`;
+        confirmMsg += `📊 Progres: PICK UP`;
+
+        return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ Pick Up Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
     // /chatid - Get chat ID (untuk setup GROUP_CHAT_ID)
     // ============================================================
     else if (/^\/chatid\b/i.test(text)) {
@@ -1269,17 +1695,27 @@ bot.on('message', async (msg) => {
         const helpMsg = `🤖 <b>Bot Assurance</b>
 
 <b>📝 INPUT COMMAND:</b>
-/INPUT - Input data assurance (auto-close ORDER)
+/INPUT - Input assurance (auto-close ORDER)
+/SQM - Input SQM (auto-close SQM SA SIGLI)
+/MANUAL - Input gangguan manual
+
+<b>📋 SQM:</b>
+/TICKET_SQM - Lihat & Pick Up tiket SQM Anda
 
 <b>📊 MONITORING (ADMIN):</b>
-/sisa_ticket - Ticket yang masih OPEN
+/sisa_ticket - Ticket OPEN ORDER ASSURANCE
 /cek_ttr - Cek TTR warning & expired
-/material_used - Total material yang dipakai
-/rekap_hari - Rekap close teknisi HARI INI
-/rekap_bulan - Rekap close teknisi BULAN INI
-/rekap_tahun - Rekap close teknisi TAHUN INI
+/material_used - Total material
 
-<b>📋 FORMAT /INPUT:</b>
+<b>📈 REKAP (ADMIN):</b>
+/rekap_hari - Rekap hari ini
+/rekap_bulan - Rekap bulan ini
+/REKAP_JANUARI s/d /REKAP_DESEMBER
+/rekap_tahun - Rekap tahun (per bulan)
+/REKAP_MANUAL - Rekap gangguan manual
+/REKAP_SQM - Rekap SQM SA SIGLI
+
+<b>📋 FORMAT /INPUT & /SQM:</b>
 /INPUT INC47052822
 CLOSE: deskripsi perbaikan
 DROPCORE: 0
@@ -1294,10 +1730,18 @@ ROSET: 0
 RJ 45: 0
 LAN: 0
 
+<b>📋 FORMAT /MANUAL:</b>
+/MANUAL
+CLOSE: deskripsi perbaikan
+SERVICE NO: 111149103305
+WORKZONE: SLG
+
 <b>⚙️ FITUR OTOMATIS:</b>
 • Auto-fill teknisi berdasarkan workzone
 • TTR monitoring & alert ke group
-• Auto-close status saat /INPUT`;
+• Auto-close status saat /INPUT
+• Deteksi gangguan berulang (GAUL)
+• Auto-post sisa ticket (1 jam)`;
 
         return sendTelegram(chatId, helpMsg, { reply_to_message_id: msgId });
       } catch (err) {
