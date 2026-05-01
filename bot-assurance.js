@@ -482,6 +482,23 @@ function resolveTeamName(workzone, mappings, teamConfig) {
 // === HELPER: Resolve team name from TEKNISI username directly ===
 function resolveTeamByTeknisi(teknisiStr, teamConfig) {
   if (!teknisiStr) return 'UNKNOWN';
+  
+  // Hard-coded team mapping for reliable resolution
+  const TEAM_MAP = {
+    'fh_demna': 'SGI', 'fh_rizqi': 'SGI',
+    'fh_rayyan': 'BNN', 'fh_mhdfauzan': 'BNN',
+    'fh_aqil': 'MRU', 'fh_rijal': 'MRU',
+    'paman_sgi': 'MTC', 'fh_imam': 'MTC',
+  };
+  
+  const cleaned = teknisiStr.replace(/@/g, '').toLowerCase();
+  
+  // Check hard-coded map first (most reliable)
+  for (const [key, team] of Object.entries(TEAM_MAP)) {
+    if (cleaned.includes(key)) return getTeamDisplayName(team);
+  }
+  
+  // Fallback to teamConfig from MASTER sheet
   const usernames = teknisiStr.split(/[&,]/).map(u => u.replace('@', '').trim().toLowerCase());
   for (const u of usernames) {
     const sektor = teamConfig.get(u);
@@ -491,7 +508,7 @@ function resolveTeamByTeknisi(teknisiStr, teamConfig) {
     if (!u) continue;
     for (const [key, sektor] of teamConfig.entries()) {
       if (sektor && sektor !== 'ALL' && sektor !== 'LTM') {
-        if (key.includes(u) || u.includes(key)) return getTeamDisplayName(sektor);
+        if (u.includes(key) || key.includes(u)) return getTeamDisplayName(sektor);
       }
     }
   }
