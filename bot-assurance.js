@@ -39,6 +39,7 @@ const ORDER_ASSURANCE_SHEET = 'ORDER ASSURANCE';
 const MASTER_SHEET = 'MASTER';
 const SQM_SHEET = 'SQM SA SIGLI';
 const MANUAL_GGN_SHEET = 'MANUAL GGN';
+const UNSPEC_SHEET = 'UNSPEC';
 
 const TTR_TABLE = {
   'HVC_DIAMOND': 3,
@@ -254,36 +255,22 @@ async function getActiveAdmins() {
   }
 }
 
-// === HELPER: Get workzone mappings from ORDER ASSURANCE (auto-detect columns) ===
-function getWorkzoneMappings(data) {
-  if (!data || data.length < 2) return [];
+// === HELPER: Get workzone mappings from MASTER sheet (columns X=23, Y=24) ===
+async function getWorkzoneMappings() {
+  const data = await getSheetData(MASTER_SHEET);
+  if (!data || data.length < 3) return []; // header row 2, data from row 3
 
-  // Auto-detect MAPPING TEAM and WORKZONE columns from header
-  const header = data[0] || [];
-  let teamColIdx = -1;
-  let wzColIdx = -1;
-
-  for (let c = 0; c < header.length; c++) {
-    const h = (header[c] || '').toUpperCase().trim();
-    if (h.includes('MAPPING') && h.includes('TEAM')) teamColIdx = c;
-    // Only match WORKZONE columns after column 10 (to skip main WORKZONE at col E)
-    if (c > 10 && h.includes('WORKZONE')) wzColIdx = c;
-  }
-
-  // Fallback to Q(16) and R(17) if not found
-  if (teamColIdx === -1) teamColIdx = 16;
-  if (wzColIdx === -1) wzColIdx = teamColIdx + 1;
-
-  console.log(`📍 Mapping columns detected: MAPPING TEAM=col ${teamColIdx}, WORKZONE=col ${wzColIdx}`);
+  const MAPPING_TEAM_COL = 23; // X
+  const WORKZONE_COL = 24; // Y
 
   const mappings = [];
-  for (let i = 1; i < data.length; i++) {
-    const team = (data[i][teamColIdx] || '').trim();
-    const wz = (data[i][wzColIdx] || '').trim();
+  for (let i = 2; i < data.length; i++) {
+    const team = (data[i][MAPPING_TEAM_COL] || '').trim();
+    const wz = (data[i][WORKZONE_COL] || '').trim();
     if (team && wz) mappings.push({ team, workzone: wz });
   }
 
-  console.log(`📍 Found ${mappings.length} workzone mappings`);
+  console.log(`📍 Found ${mappings.length} workzone mappings from MASTER`);
 
   // Remove duplicates
   const seen = new Set();
@@ -296,18 +283,16 @@ function getWorkzoneMappings(data) {
 }
 
 // === HELPER: Find mapping team for a workzone ===
-function findMappingTeam(workzone, status, mappings) {
-  if (!workzone && status !== 'GAMAS') return null;
-  if (status === 'GAMAS') {
-    const allMap = mappings.find(m => m.workzone.toUpperCase() === 'ALL');
-    return allMap ? allMap.team : null;
-  }
+function findMappingTeam(workzone, mappings) {
+  if (!workzone) return null;
   for (const mapping of mappings) {
     if (mapping.workzone.toUpperCase() === 'ALL') continue;
     const zones = mapping.workzone.split(/[&,]/).map(z => z.trim().toUpperCase());
     if (zones.includes(workzone.toUpperCase())) return mapping.team;
   }
-  return null;
+  // Fallback: check ALL mapping
+  const allMap = mappings.find(m => m.workzone.toUpperCase() === 'ALL');
+  return allMap ? allMap.team : null;
 }
 
 // === HELPER: Parse TTR duration string to hours ===
@@ -427,7 +412,203 @@ function extractWorkzoneFromODP(odp) {
   return match ? match[1].toUpperCase() : '';
 }
 
+// === HELPER: Get team config from MASTER (username → sektor) ===
+function getTeamConfig(masterData) {
+  const config = new Map();
+  if (!masterData || masterData.length < 3) return config;
+  for (let i = 2; i < masterData.length; i++) {
+    const uname = (masterData[i][8] || '').replace('@', '').toLowerCase().trim();
+    const sektor = (masterData[i][11] || '').trim().toUpperCase();
+    const status = (masterData[i][10] || '').trim().toUpperCase();
+    if (uname && sektor && status === 'AKTIF') config.set(uname, sektor);
+  }
+  return config;
+}
 
+// === HELPER: Get piket schedule from MASTER (T=19, U=20, V=21) ===
+function getPiketSchedule(masterData) {
+  const schedule = [];
+  if (!masterData || masterData.length < 3) return schedule;
+  for (let i = 2; i < masterData.length; i++) {
+    const tanggal = (masterData[i][19] || '').trim();
+    const sektor = (masterData[i][20] || '').trim().toUpperCase();
+    const teknisi = (masterData[i][21] || '').trim();
+    if (tanggal && teknisi) schedule.push({ tanggal, sektor, teknisi });
+  }
+  return schedule;
+}
+
+// === HELPER: Check if today is weekday (Mon-Fri) in Jakarta ===
+function isWeekday() {
+  const dayName = new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'Asia/Jakarta' });
+  return !['Saturday', 'Sunday'].includes(dayName);
+}
+
+// === HELPER: Get team display name ===
+function getTeamDisplayName(sektor) {
+  if (!sektor) return 'UNKNOWN';
+  return `TEAM ${sektor.toUpperCase()}`;
+}
+
+// === HELPER: Build progress bar ===
+function buildProgressBar(completed, total, width = 10) {
+  if (total === 0) return '░'.repeat(width) + ' 0%';
+  const pct = Math.round((completed / total) * 100);
+  const filled = Math.round((completed / total) * width);
+  return '█'.repeat(filled) + '░'.repeat(width - filled) + ` ${pct}%`;
+}
+
+// === HELPER: Resolve team name from workzone using MASTER mappings ===
+function resolveTeamName(workzone, mappings, teamConfig) {
+  const team = findMappingTeam(workzone, mappings);
+  if (team) {
+    const usernames = team.split(/\s*&\s*/).map(u => u.replace('@', '').trim().toLowerCase());
+    for (const u of usernames) {
+      const sektor = teamConfig.get(u);
+      if (sektor && sektor !== 'ALL' && sektor !== 'LTM') return getTeamDisplayName(sektor);
+    }
+  }
+  return workzone ? `TEAM ${workzone.toUpperCase()}` : 'UNKNOWN';
+}
+
+// === HELPER: Parse piket date (dd.mm.yyyy) ===
+function parsePiketDate(dateStr) {
+  if (!dateStr) return null;
+  const parts = dateStr.split('.');
+  if (parts.length < 3) return null;
+  return { day: parseInt(parts[0]), month: parseInt(parts[1]), year: parseInt(parts[2]) };
+}
+
+// === HELPER: Get today's piket teknisi ===
+function getTodayPiket(piketSchedule) {
+  const today = getTodayJakarta();
+  return piketSchedule.filter(p => {
+    const d = parsePiketDate(p.tanggal);
+    return d && d.day === today.day && d.month === today.month && d.year === today.year;
+  });
+}
+
+// === CORE: Get productivity data across all 4 sheets ===
+async function getProductivityData(dateFilterFn) {
+  const [orderData, progresData, sqmData, manualData, unspecData, masterData] = await Promise.all([
+    getSheetData(ORDER_ASSURANCE_SHEET, false),
+    getSheetData(ASSURANCE_SHEET, false),
+    getSheetData(SQM_SHEET, false),
+    getSheetData(MANUAL_GGN_SHEET, false),
+    getSheetData(UNSPEC_SHEET, false),
+    getSheetData(MASTER_SHEET, false),
+  ]);
+
+  const mappings = await getWorkzoneMappings();
+  const teamConfig = getTeamConfig(masterData);
+  const result = {};
+
+  function ensureTeam(name) {
+    if (!result[name]) {
+      result[name] = {
+        reguler: { closed: [], open: [] },
+        unspec: { closed: [], open: [] },
+        sqm: { closed: [], open: [] },
+        manual: { closed: [] },
+      };
+    }
+  }
+
+  // 1. REGULER — closed from PROGRES ASSURANCE, open from ORDER ASSURANCE
+  const closedIncidents = new Set();
+  const closedIncidentTeknisi = {};
+  if (progresData) {
+    for (let i = 1; i < progresData.length; i++) {
+      const tanggal = (progresData[i][0] || '').trim();
+      const incident = (progresData[i][1] || '').trim().toUpperCase();
+      const teknisi = (progresData[i][14] || '').trim();
+      const d = parseIndonesianDate(tanggal);
+      if (d && dateFilterFn(d) && incident) {
+        closedIncidents.add(incident);
+        closedIncidentTeknisi[incident] = teknisi;
+      }
+    }
+  }
+
+  const orderCols = orderData ? getOrderColumns(orderData) : null;
+  if (orderData && orderCols) {
+    for (let i = 1; i < orderData.length; i++) {
+      const incident = (orderData[i][orderCols.incident] || '').trim();
+      const workzone = (orderData[i][orderCols.workzone] || '').trim();
+      const status = (orderData[i][orderCols.status] || '').toUpperCase().trim();
+      const custType = (orderData[i][orderCols.customerType] || '').trim();
+      const ttrStr = (orderData[i][orderCols.ttrCustomer] || '').trim();
+      if (!incident) continue;
+
+      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      ensureTeam(teamName);
+
+      if (closedIncidents.has(incident.toUpperCase())) {
+        result[teamName].reguler.closed.push({ incident, custType, ttr: ttrStr });
+      } else if (status === 'OPEN') {
+        result[teamName].reguler.open.push({ incident, custType, ttr: ttrStr });
+      }
+    }
+  }
+
+  // 2. UNSPEC — H=7:SERVICE NO, I=8:DEVICE NAME, J=9:STATUS, Q=16:HASIL UKUR
+  if (unspecData) {
+    for (let i = 1; i < unspecData.length; i++) {
+      const tanggal = (unspecData[i][0] || '').trim();
+      const workzone = (unspecData[i][4] || '').trim();
+      const serviceNo = (unspecData[i][7] || '').trim();
+      const deviceName = (unspecData[i][8] || '').trim();
+      const status = (unspecData[i][9] || '').toUpperCase().trim();
+      const d = parseIndonesianDate(tanggal);
+
+      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      ensureTeam(teamName);
+
+      if (status === 'CLOSE' && d && dateFilterFn(d)) {
+        result[teamName].unspec.closed.push({ serviceNo, deviceName });
+      } else if (status === 'OPEN') {
+        result[teamName].unspec.open.push({ serviceNo, deviceName });
+      }
+    }
+  }
+
+  // 3. SQM — B=1:INCIDENT, E=4:WORKZONE, J=9:STATUS
+  if (sqmData) {
+    for (let i = 1; i < sqmData.length; i++) {
+      const tanggal = (sqmData[i][0] || '').trim();
+      const incident = (sqmData[i][1] || '').trim();
+      const workzone = (sqmData[i][4] || '').trim();
+      const status = (sqmData[i][9] || '').toUpperCase().trim();
+      const d = parseIndonesianDate(tanggal);
+
+      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      ensureTeam(teamName);
+
+      if (status === 'CLOSE' && d && dateFilterFn(d)) {
+        result[teamName].sqm.closed.push({ incident });
+      } else if (status === 'OPEN') {
+        result[teamName].sqm.open.push({ incident });
+      }
+    }
+  }
+
+  // 4. MANUAL GGN — D=3:WORKZONE, always CLOSE
+  if (manualData) {
+    for (let i = 1; i < manualData.length; i++) {
+      const tanggal = (manualData[i][0] || '').trim();
+      const serviceNo = (manualData[i][4] || '').trim();
+      const workzone = (manualData[i][3] || '').trim();
+      const d = parseIndonesianDate(tanggal);
+      if (!d || !dateFilterFn(d)) continue;
+
+      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      ensureTeam(teamName);
+      result[teamName].manual.closed.push({ serviceNo, tanggal });
+    }
+  }
+
+  return { teams: result, weekday: isWeekday(), piket: getTodayPiket(getPiketSchedule(masterData)), teamConfig };
+}
 
 // === BOT SETUP ===
 const PORT = process.env.PORT || 3002;
@@ -461,7 +642,7 @@ async function autoFillTeknisi() {
     if (!data || data.length < 2) return;
 
     const cols = getOrderColumns(data);
-    const mappings = getWorkzoneMappings(data);
+    const mappings = await getWorkzoneMappings();
     let filled = 0;
 
     for (let i = 1; i < data.length; i++) {
@@ -471,7 +652,7 @@ async function autoFillTeknisi() {
 
       if (teknisi || !status || status === 'CLOSE') continue;
 
-      const team = findMappingTeam(workzone, status, mappings);
+      const team = findMappingTeam(workzone, mappings);
       if (team) {
         const rowNum = i + 1;
         await updateSheetCell(ORDER_ASSURANCE_SHEET, `C${rowNum}`, team);
@@ -497,7 +678,7 @@ async function checkTTRAlerts() {
     if (!data || data.length < 2) return;
 
     const cols = getOrderColumns(data);
-    const mappings = getWorkzoneMappings(data);
+    const mappings = await getWorkzoneMappings();
     const admins = await getActiveAdmins();
     const adminTags = admins.map(a => `@${a}`).join(' ');
 
@@ -524,7 +705,7 @@ async function checkTTRAlerts() {
       }
       if (maxTTR === null) continue;
 
-      const team = findMappingTeam(workzone, status, mappings) || (data[i][cols.teknisi] || '-').trim();
+      const team = findMappingTeam(workzone, mappings) || (data[i][cols.teknisi] || '-').trim();
       const cleanTeam = team.replace(/@@/g, '@');
 
       // === EXPIRED ===
@@ -618,7 +799,7 @@ async function buildSisaTicketReport() {
   if (!data || data.length < 2) return null;
 
   const cols = getOrderColumns(data);
-  const mappings = getWorkzoneMappings(data);
+  const mappings = await getWorkzoneMappings();
 
   const now = new Date();
   const dayNameID = ['MINGGU', 'SENIN', 'SELASA', 'RABU', 'KAMIS', 'JUMAT', 'SABTU'][now.getDay()];
@@ -627,8 +808,6 @@ async function buildSisaTicketReport() {
 
   let ticketsByTeam = {};
   let totalOpen = 0;
-  let gamasTickets = {};
-  let totalGamas = 0;
 
   for (let i = 1; i < data.length; i++) {
     const incident = (data[i][cols.incident] || '-').trim();
@@ -639,17 +818,11 @@ async function buildSisaTicketReport() {
     const status = (data[i][cols.status] || '').toUpperCase().trim();
 
     if (status === 'OPEN') {
-      const team = findMappingTeam(workzone, status, mappings) || workzone || '-';
+      const team = findMappingTeam(workzone, mappings) || workzone || '-';
       const cleanTeam = team.replace(/@@/g, '@');
       if (!ticketsByTeam[cleanTeam]) ticketsByTeam[cleanTeam] = [];
       ticketsByTeam[cleanTeam].push({ incident, ttr: ttrCustomer, custType, hasilUkur });
       totalOpen++;
-    } else if (status === 'GAMAS') {
-      const team = findMappingTeam(workzone, 'GAMAS', mappings) || workzone || '-';
-      const cleanTeam = team.replace(/@@/g, '@');
-      if (!gamasTickets[cleanTeam]) gamasTickets[cleanTeam] = [];
-      gamasTickets[cleanTeam].push({ incident, ttr: ttrCustomer, custType, hasilUkur });
-      totalGamas++;
     }
   }
 
@@ -664,21 +837,6 @@ async function buildSisaTicketReport() {
   } else {
     sortedTeams.forEach((teamName, idx) => {
       const tickets = ticketsByTeam[teamName].sort((a, b) => (parseTTRHours(a.ttr) || 0) - (parseTTRHours(b.ttr) || 0));
-      const num = idx < 10 ? numEmoji[idx] : `${idx + 1}.`;
-      response += `${num} <b>${teamName}</b> [${tickets.length}]\n`;
-      tickets.forEach(t => {
-        const hu = t.hasilUkur ? ` | ${t.hasilUkur}` : '';
-        response += `   🔹 ${t.incident} | ${t.ttr} | ${t.custType}${hu}\n`;
-      });
-      response += '\n';
-    });
-  }
-
-  if (totalGamas > 0) {
-    response += `🎫 <b>GAMAS : ${totalGamas} tickets</b>\n\n`;
-    const sortedGamas = Object.keys(gamasTickets).sort();
-    sortedGamas.forEach((teamName, idx) => {
-      const tickets = gamasTickets[teamName].sort((a, b) => (parseTTRHours(a.ttr) || 0) - (parseTTRHours(b.ttr) || 0));
       const num = idx < 10 ? numEmoji[idx] : `${idx + 1}.`;
       response += `${num} <b>${teamName}</b> [${tickets.length}]\n`;
       tickets.forEach(t => {
@@ -757,8 +915,8 @@ bot.on('message', async (msg) => {
         const workzone = extractWorkzoneFromODP(tiket.odp);
 
         // Map teknisi using workzone → MAPPING TEAM
-        const mappings = getWorkzoneMappings(orderData);
-        const mappedTeknisi = findMappingTeam(workzone, 'OPEN', mappings) || tiket.teknisi;
+        const mappings = await getWorkzoneMappings();
+        const mappedTeknisi = findMappingTeam(workzone, mappings) || tiket.teknisi;
 
         // Format tanggal saat ini
         const tanggal = new Date().toLocaleDateString('id-ID', {
@@ -928,9 +1086,22 @@ bot.on('message', async (msg) => {
           console.error('⚠️ Auto-close error:', closeErr.message);
         }
 
-        let confirmMsg = `✅ Data Reguller berhasil disimpan!\n\n`;
+        let confirmMsg = `✅ Data Assurance berhasil disimpan!\n\n`;
+        confirmMsg += `<b>Incident:</b> ${parsed.incidentNo}\n`;
         confirmMsg += `<b>Close:</b> ${parsed.closeDesc}\n`;
         if (orderClosed) confirmMsg += `<b>Status ORDER:</b> ✅ Auto-CLOSE | <b>KAWAL TTR:</b> ${kawalTTR}\n`;
+        confirmMsg += `<b>Material:</b>\n`;
+        confirmMsg += `  • Dropcore: ${parsed.dropcore || '-'}\n`;
+        confirmMsg += `  • Patchcord: ${parsed.patchcord || '-'}\n`;
+        confirmMsg += `  • SOC: ${parsed.soc || '-'}\n`;
+        confirmMsg += `  • PSLAVE: ${parsed.pslave || '-'}\n`;
+        confirmMsg += `  • PASSIVE 1/8: ${parsed.passive1_8 || '-'}\n`;
+        confirmMsg += `  • PASSIVE 1/4: ${parsed.passive1_4 || '-'}\n`;
+        confirmMsg += `  • Pigtail: ${parsed.pigtail || '-'}\n`;
+        confirmMsg += `  • Adaptor: ${parsed.adaptor || '-'}\n`;
+        confirmMsg += `  • Roset: ${parsed.roset || '-'}\n`;
+        confirmMsg += `  • RJ 45: ${parsed.rj45 || '-'}\n`;
+        confirmMsg += `  • LAN: ${parsed.lan || '-'}`;
 
         return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
       } catch (err) {
@@ -969,7 +1140,7 @@ bot.on('message', async (msg) => {
         if (!data || data.length < 2) return sendTelegram(chatId, '<i>Tidak ada data</i>', { reply_to_message_id: msgId });
 
         const cols = getOrderColumns(data);
-        const mappings = getWorkzoneMappings(data);
+        const mappings = await getWorkzoneMappings();
         let expiredList = [];
         let warningList = [];
         let safeList = [];
@@ -992,7 +1163,7 @@ bot.on('message', async (msg) => {
           }
           if (maxTTR === null) continue;
 
-          const team = findMappingTeam(workzone, status, mappings) || (data[i][cols.teknisi] || '-').trim();
+          const team = findMappingTeam(workzone, mappings) || (data[i][cols.teknisi] || '-').trim();
           const cleanTeam = team.replace(/@@/g, '@');
 
           const entry = { incident, ttrStr, custType, maxTTR, elapsed, team: cleanTeam };
@@ -1091,9 +1262,10 @@ bot.on('message', async (msg) => {
     // ============================================================
     else if (/^\/rekap_hari\b/i.test(text)) {
       try {
-        const authResult = await checkAuthorization(username, ['ADMIN']);
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
         if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
 
+        const isAdmin = authResult.role === 'ADMIN';
         const data = await withTimeout(getSheetData(ASSURANCE_SHEET), 10000);
         const orderData = await withTimeout(getSheetData(ORDER_ASSURANCE_SHEET), 10000);
         const today = getTodayJakarta();
@@ -1107,6 +1279,8 @@ bot.on('message', async (msg) => {
           const d = parseIndonesianDate(tanggal);
           if (!d) continue;
           if (d.day === today.day && d.month === today.month && d.year === today.year) {
+            // Filter: user hanya lihat milik sendiri
+            if (!isAdmin && !teknisi.toLowerCase().includes(username.toLowerCase())) continue;
             map[teknisi] = (map[teknisi] || 0) + 1;
             if (incident) incidents.push(incident.toUpperCase());
           }
@@ -1116,7 +1290,7 @@ bot.on('message', async (msg) => {
         let comply = 0, notComply = 0;
         for (let i = 1; i < orderData.length; i++) {
           const inc = (orderData[i][1] || '').trim().toUpperCase();
-          const kawal = (orderData[i][17] || '').trim().toUpperCase(); // Kolom R = index 17
+          const kawal = (orderData[i][17] || '').trim().toUpperCase();
           if (incidents.includes(inc)) {
             if (kawal === 'COMPLY') comply++;
             else if (kawal === 'NOT COMPLY') notComply++;
@@ -1129,7 +1303,8 @@ bot.on('message', async (msg) => {
         const total = entries.reduce((sum, [_, c]) => sum + c, 0);
 
         const medal = ['🥇', '🥈', '🥉'];
-        let response = `━━━━━━━━━━━━━━━━━━━━━━\n📊 <b>REKAP CLOSE - HARI INI</b>\n📅 ${todayStr}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        let header = isAdmin ? 'REKAP CLOSE - HARI INI' : `REKAP CLOSE - @${username}`;
+        let response = `━━━━━━━━━━━━━━━━━━━━━━\n📊 <b>${header}</b>\n📅 ${todayStr}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
         if (entries.length === 0) {
           response += '<i>Belum ada data hari ini</i>';
         } else {
@@ -1372,9 +1547,8 @@ bot.on('message', async (msg) => {
         const wz = wzMatch[1].trim().toUpperCase();
 
         // Get teknisi dari mapping
-        const orderData = await getSheetData(ORDER_ASSURANCE_SHEET, false);
-        const mappings = getWorkzoneMappings(orderData);
-        const teknisi = findMappingTeam(wz, 'OPEN', mappings) || `@${username}`;
+        const mappings = await getWorkzoneMappings();
+        const teknisi = findMappingTeam(wz, mappings) || `@${username}`;
 
         const tanggal = new Date().toLocaleDateString('id-ID', {
           weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta',
@@ -1432,7 +1606,8 @@ bot.on('message', async (msg) => {
         }
 
         const sortedMonths = Object.keys(monthData).map(Number).sort((a, b) => a - b);
-        let response = `📋 <b>DETAIL LAPORAN GANGGUAN MANUAL</b>\n📅 Tahun ${today.year}\n\n`;
+        let header = isAdmin ? 'DETAIL LAPORAN GANGGUAN MANUAL' : `LAPORAN GANGGUAN MANUAL - @${username}`;
+        let response = `📋 <b>${header}</b>\n📅 Tahun ${today.year}\n\n`;
 
         if (sortedMonths.length === 0) {
           response += '<i>Belum ada data</i>';
@@ -1569,18 +1744,33 @@ bot.on('message', async (msg) => {
         await withTimeout(appendSheetData(ASSURANCE_SHEET, row), 10000);
         cache.assuranceData = null;
 
-        // Auto-close di SQM SA SIGLI
+        // Auto-close di SQM SA SIGLI (atau buat baris baru jika belum ada)
         let sqmClosed = false;
         try {
           const sqmData = await getSheetData(SQM_SHEET, false);
+          let foundInSqm = false;
           for (let i = 1; i < sqmData.length; i++) {
             const incInSqm = (sqmData[i][1] || '').trim().toUpperCase(); // B = Incident
             if (incInSqm === parsed.incidentNo) {
               await updateSheetCell(SQM_SHEET, `J${i + 1}`, 'CLOSE'); // J = Status
               sqmClosed = true;
+              foundInSqm = true;
               console.log(`✅ Auto-close SQM: ${parsed.incidentNo} row ${i + 1}`);
               break;
             }
+          }
+
+          // Jika INCIDENT belum ada di SQM → buat baris baru
+          if (!foundInSqm) {
+            const tanggal = new Date().toLocaleDateString('id-ID', {
+              weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta',
+            });
+            const teknisi = parsed.teknisi || `@${username}`;
+            // A=Tanggal, B=Incident, C=Teknisi, D-I=(skip), J=Status=CLOSE
+            const newRow = [tanggal, parsed.incidentNo, teknisi, '', '', '', '', '', '', 'CLOSE'];
+            await withTimeout(appendSheetData(SQM_SHEET, newRow), 10000);
+            sqmClosed = true;
+            console.log(`✅ SQM new row created + CLOSE: ${parsed.incidentNo}`);
           }
         } catch (closeErr) {
           console.error('⚠️ SQM close error:', closeErr.message);
@@ -1678,12 +1868,24 @@ bot.on('message', async (msg) => {
 
         const pickedUp = [];
         const notFound = [];
+        const alreadyPicked = [];
+
+        // Cek kolom Q (PROGRES) langsung dari sheet untuk status PICK UP
+        const sqmData = await withTimeout(getSheetData(SQM_SHEET, false), 10000);
 
         for (const incNo of incMatches) {
           const ticket = pending.tickets.find(t => t.incident.toUpperCase() === incNo);
           if (ticket) {
-            await updateSheetCell(SQM_SHEET, `Q${ticket.row}`, 'PICK UP');
-            pickedUp.push(ticket);
+            // Cek apakah sudah di-pickup orang lain
+            const sqmRow = sqmData[ticket.row - 1]; // row is 1-based, array is 0-based
+            const progres = (sqmRow && sqmRow[16] || '').trim().toUpperCase(); // Q = index 16
+            if (progres === 'PICK UP') {
+              const pickedByTeknisi = (sqmRow[2] || '').trim(); // C = Teknisi
+              alreadyPicked.push({ incident: incNo, pickedBy: pickedByTeknisi });
+            } else {
+              await updateSheetCell(SQM_SHEET, `Q${ticket.row}`, 'PICK UP');
+              pickedUp.push(ticket);
+            }
           } else {
             notFound.push(incNo);
           }
@@ -1698,6 +1900,12 @@ bot.on('message', async (msg) => {
             confirmMsg += `🔹 ${t.incident} | ${t.serviceNo} | ${t.deviceName}\n`;
           });
         }
+        if (alreadyPicked.length > 0) {
+          confirmMsg += `\n⚠️ Sudah di Pick Up oleh user lain:\n`;
+          alreadyPicked.forEach(t => {
+            confirmMsg += `🔸 ${t.incident} → ${t.pickedBy}\n`;
+          });
+        }
         if (notFound.length > 0) {
           confirmMsg += `\n❌ Tidak ditemukan: ${notFound.join(', ')}`;
         }
@@ -1705,6 +1913,456 @@ bot.on('message', async (msg) => {
         return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ Pick Up Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+    // ============================================================
+    // /unspec - Close UNSPEC ticket (mirip /MANUAL)
+    // ============================================================
+    else if (/^\/unspec\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const inputText = text.replace(/^\/unspec\s*/i, '').trim();
+        if (!inputText) {
+          return sendTelegram(chatId, `❌ Format tidak sesuai. Gunakan format:\n\n/unspec\nCLOSE: deskripsi perbaikan\nSERVICE NO: 111106102101\nWORKZONE: BNN`, { reply_to_message_id: msgId });
+        }
+
+        const closeMatch = inputText.match(/CLOSE\s*:\s*(.+)/i);
+        const svcMatch = inputText.match(/SERVICE\s*NO\s*:\s*(.+)/i);
+        const wzMatch = inputText.match(/WORKZONE\s*:\s*(.+)/i);
+
+        if (!closeMatch || !svcMatch || !wzMatch) {
+          return sendTelegram(chatId, `❌ Format tidak sesuai. Gunakan format:\n\n/unspec\nCLOSE: deskripsi perbaikan\nSERVICE NO: 111106102101\nWORKZONE: BNN`, { reply_to_message_id: msgId });
+        }
+
+        const closeDesc = closeMatch[1].trim();
+        const serviceNo = svcMatch[1].trim();
+        const wz = wzMatch[1].trim().toUpperCase();
+
+        // Get teknisi dari mapping
+        const mappings = await getWorkzoneMappings();
+        const teknisi = findMappingTeam(wz, mappings) || `@${username}`;
+
+        const tanggal = new Date().toLocaleDateString('id-ID', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta',
+        });
+
+        // Auto-close di UNSPEC sheet (find by SERVICE NO)
+        let unspecClosed = false;
+        try {
+          const unspecData = await getSheetData(UNSPEC_SHEET, false);
+          for (let i = 1; i < unspecData.length; i++) {
+            const existingSN = (unspecData[i][7] || '').trim(); // H = Service No
+            const existingStatus = (unspecData[i][9] || '').toUpperCase().trim(); // J = Status
+            if (existingSN === serviceNo && existingStatus === 'OPEN') {
+              await updateSheetCell(UNSPEC_SHEET, `J${i + 1}`, 'CLOSE');
+              unspecClosed = true;
+              console.log(`✅ Auto-close UNSPEC: ${serviceNo} row ${i + 1}`);
+              break;
+            }
+          }
+        } catch (closeErr) {
+          console.error('⚠️ UNSPEC close error:', closeErr.message);
+        }
+
+        // Simpan ke PROGRES ASSURANCE
+        const inputTimestamp = new Date().toLocaleString('id-ID', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          timeZone: 'Asia/Jakarta', hour12: false,
+        });
+        const row = [
+          tanggal, `UNSPEC-${serviceNo}`,
+          '', '', '', '', '', '', '', '', '', '', '',
+          closeDesc, username.replace('@', ''), inputTimestamp,
+        ];
+        await withTimeout(appendSheetData(ASSURANCE_SHEET, row), 10000);
+        cache.assuranceData = null;
+
+        let confirmMsg = `✅ Data UNSPEC berhasil disimpan!\n\n`;
+        confirmMsg += `📋 Detail:\n`;
+        confirmMsg += `📅 Tanggal: ${tanggal}\n`;
+        confirmMsg += `👷 Teknisi: ${teknisi}\n`;
+        confirmMsg += `📍 Workzone: ${wz}\n`;
+        confirmMsg += `📞 Service No: ${serviceNo}\n`;
+        confirmMsg += `📝 Close: ${closeDesc}\n`;
+        if (unspecClosed) confirmMsg += `📊 Status UNSPEC: ✅ Auto-CLOSE`;
+        else confirmMsg += `⚠️ Service No tidak ditemukan di sheet UNSPEC`;
+
+        return sendTelegram(chatId, confirmMsg, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /unspec Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /REKAP_UNSPEC - Rekap UNSPEC per bulan
+    // ============================================================
+    else if (/^\/REKAP_UNSPEC\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['USER', 'ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const isAdmin = authResult.role === 'ADMIN';
+        const data = await withTimeout(getSheetData(UNSPEC_SHEET, false), 10000);
+        const today = getTodayJakarta();
+        const bulanNames = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+        let monthData = {};
+        let grandTotal = 0;
+
+        for (let i = 1; i < data.length; i++) {
+          const tanggal = (data[i][0] || '').trim();
+          const teknisi = (data[i][2] || '').trim();
+          const serviceNo = (data[i][7] || '').trim();
+          const status = (data[i][9] || '').trim().toUpperCase();
+          if (status !== 'CLOSE') continue;
+
+          const d = parseIndonesianDate(tanggal);
+          if (!d || d.year !== today.year) continue;
+          if (!isAdmin && !teknisi.toLowerCase().includes(username.toLowerCase())) continue;
+
+          if (!monthData[d.month]) monthData[d.month] = [];
+          monthData[d.month].push({ tanggal, serviceNo, teknisi });
+          grandTotal++;
+        }
+
+        const sortedMonths = Object.keys(monthData).map(Number).sort((a, b) => a - b);
+        let header = isAdmin ? 'DETAIL LAPORAN UNSPEC' : `LAPORAN UNSPEC - @${username}`;
+        let response = `📋 <b>${header}</b>\n📅 Tahun ${today.year}\n\n`;
+
+        if (sortedMonths.length === 0) {
+          response += '<i>Belum ada data</i>';
+        } else {
+          sortedMonths.forEach(month => {
+            const items = monthData[month];
+            response += `📅 <b>${bulanNames[month].toUpperCase()}</b> [${items.length} TIKET]\n`;
+            items.forEach(item => {
+              if (isAdmin) response += `  ${item.tanggal} | ${item.serviceNo} | ${item.teknisi}\n`;
+              else response += `  ${item.tanggal} | ${item.serviceNo}\n`;
+            });
+            response += '\n';
+          });
+          response += `📋 <b>Grand Total: ${grandTotal} tiket</b>`;
+        }
+
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /REKAP_UNSPEC Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /produktivitas_hari - Team Daily Productivity (visual)
+    // ============================================================
+    else if (/^\/produktivitas_hari\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const today = getTodayJakarta();
+        const dateFilter = d => d.day === today.day && d.month === today.month && d.year === today.year;
+        const prodData = await withTimeout(getProductivityData(dateFilter), 15000);
+
+        const now = new Date();
+        const dayNameID = ['MINGGU', 'SENIN', 'SELASA', 'RABU', 'KAMIS', 'JUMAT', 'SABTU'];
+        const dayIdx = parseInt(now.toLocaleDateString('en-US', { weekday: 'numeric', timeZone: 'Asia/Jakarta' })) || now.getDay();
+        const dateStr = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+        const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
+
+        const numEmoji = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+
+        let response = `╔══════════════════════════════════╗\n`;
+        response += `║  📊 <b>PRODUKTIVITAS TEAM - HARI INI</b>\n`;
+        response += `║  📅 ${dateStr} | 🕐 ${timeStr}\n`;
+
+        if (!prodData.weekday) {
+          const piketList = prodData.piket;
+          if (piketList.length > 0) {
+            response += `║  📋 Mode: <b>PIKET</b> (Weekend)\n`;
+          }
+        }
+        response += `╠══════════════════════════════════╣\n\n`;
+
+        const teams = prodData.teams;
+        const sortedTeams = Object.keys(teams).sort((a, b) => {
+          const totalA = teams[a].reguler.closed.length + teams[a].unspec.closed.length + teams[a].sqm.closed.length + teams[a].manual.closed.length;
+          const totalB = teams[b].reguler.closed.length + teams[b].unspec.closed.length + teams[b].sqm.closed.length + teams[b].manual.closed.length;
+          return totalB - totalA;
+        });
+
+        if (sortedTeams.length === 0) {
+          response += '<i>Belum ada data hari ini</i>\n';
+        } else {
+          sortedTeams.forEach((teamName, idx) => {
+            const t = teams[teamName];
+            const closed = t.reguler.closed.length + t.unspec.closed.length + t.sqm.closed.length + t.manual.closed.length;
+            const open = t.reguler.open.length + t.unspec.open.length + t.sqm.open.length;
+            const total = closed + open;
+
+            const num = idx < 10 ? numEmoji[idx] : `${idx + 1}.`;
+            response += `${num} <b>${teamName}</b>\n`;
+            response += `├─ 📈 Total: ${total} | Selesai: ${closed} | Open: ${open}\n`;
+            response += `├─ 📋 REGULER: ${t.reguler.closed.length} closed, ${t.reguler.open.length} open\n`;
+            response += `├─ ❓ UNSPEC: ${t.unspec.closed.length} closed, ${t.unspec.open.length} open\n`;
+            response += `├─ 📍 SQM: ${t.sqm.closed.length} closed, ${t.sqm.open.length} open\n`;
+            response += `└─ 🛠 MANUAL GGN: ${t.manual.closed.length} closed\n\n`;
+          });
+        }
+
+        response += `╚══════════════════════════════════╝`;
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /produktivitas_hari Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /detail_team [name] - Detailed Team Report
+    // ============================================================
+    else if (/^\/detail_team\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const teamArg = text.replace(/^\/detail_team\s*/i, '').trim().toUpperCase();
+        if (!teamArg) {
+          return sendTelegram(chatId, `❌ Gunakan format: /detail_team SGI\n\nTeam tersedia: SGI, BNN, MRU, MTC`, { reply_to_message_id: msgId });
+        }
+
+        const targetTeam = `TEAM ${teamArg}`;
+        const today = getTodayJakarta();
+        const dateFilter = d => d.day === today.day && d.month === today.month && d.year === today.year;
+        const prodData = await withTimeout(getProductivityData(dateFilter), 15000);
+
+        const t = prodData.teams[targetTeam];
+        if (!t) {
+          const available = Object.keys(prodData.teams).join(', ') || 'Belum ada data';
+          return sendTelegram(chatId, `❌ Team "${targetTeam}" tidak ditemukan.\n\nTeam tersedia: ${available}`, { reply_to_message_id: msgId });
+        }
+
+        const closed = t.reguler.closed.length + t.unspec.closed.length + t.sqm.closed.length + t.manual.closed.length;
+        const open = t.reguler.open.length + t.unspec.open.length + t.sqm.open.length;
+        const total = closed + open;
+
+        const dateStr = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+
+        let response = `╔══════════════════════════════════════╗\n`;
+        response += `║  👷 <b>DETAIL ${targetTeam} - HARI INI</b>\n`;
+        response += `║  📅 ${dateStr}\n`;
+        response += `╠══════════════════════════════════════╣\n\n`;
+
+        response += `📊 <b>SUMMARY</b>\n`;
+        response += `├─ Total: ${total} | Completed: ${closed} (${total > 0 ? Math.round(closed / total * 100) : 0}%) | Open: ${open}\n`;
+        response += `└─ ${buildProgressBar(closed, total, 14)}\n\n`;
+
+        // REGULER
+        response += `📋 <b>REGULER</b> (${t.reguler.closed.length} selesai, ${t.reguler.open.length} open)\n`;
+        if (t.reguler.closed.length > 0) {
+          response += `├─ CLOSED:\n`;
+          t.reguler.closed.forEach(tk => { response += `│  • ${tk.incident} ✅\n`; });
+        }
+        if (t.reguler.open.length > 0) {
+          response += `└─ OPEN:\n`;
+          t.reguler.open.forEach(tk => { response += `   • ${tk.incident} | ${tk.ttr || '-'} | ${tk.custType || '-'}\n`; });
+        }
+        if (t.reguler.closed.length === 0 && t.reguler.open.length === 0) response += `└─ <i>Tidak ada data</i>\n`;
+        response += '\n';
+
+        // UNSPEC
+        response += `❓ <b>UNSPEC</b> (${t.unspec.closed.length} selesai, ${t.unspec.open.length} open)\n`;
+        if (t.unspec.closed.length > 0) {
+          response += `├─ CLOSED:\n`;
+          t.unspec.closed.forEach(tk => { response += `│  • ${tk.serviceNo || tk.deviceName} ✅\n`; });
+        }
+        if (t.unspec.open.length > 0) {
+          response += `└─ OPEN:\n`;
+          t.unspec.open.forEach(tk => { response += `   • ${tk.deviceName || tk.serviceNo} | OPEN\n`; });
+        }
+        if (t.unspec.closed.length === 0 && t.unspec.open.length === 0) response += `└─ <i>Tidak ada data</i>\n`;
+        response += '\n';
+
+        // SQM
+        response += `📍 <b>SQM SA SIGLI</b> (${t.sqm.closed.length} selesai, ${t.sqm.open.length} open)\n`;
+        if (t.sqm.closed.length > 0) {
+          response += `├─ CLOSED:\n`;
+          t.sqm.closed.forEach(tk => { response += `│  • ${tk.incident} ✅\n`; });
+        }
+        if (t.sqm.open.length > 0) {
+          response += `└─ OPEN:\n`;
+          t.sqm.open.forEach(tk => { response += `   • ${tk.incident} | OPEN\n`; });
+        }
+        if (t.sqm.closed.length === 0 && t.sqm.open.length === 0) response += `└─ <i>Tidak ada data</i>\n`;
+        response += '\n';
+
+        // MANUAL GGN
+        response += `🛠 <b>MANUAL GGN</b> (${t.manual.closed.length} selesai)\n`;
+        if (t.manual.closed.length > 0) {
+          t.manual.closed.forEach(tk => { response += `  • ${tk.serviceNo} ✅\n`; });
+        } else {
+          response += `└─ <i>Tidak ada data</i>\n`;
+        }
+
+        response += `\n╚══════════════════════════════════════╝`;
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /detail_team Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /ringkasan_produk - Weekly Summary (7 hari terakhir)
+    // ============================================================
+    else if (/^\/ringkasan_produk\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        const today = getTodayJakarta();
+        const todayDate = new Date(today.year, today.month - 1, today.day);
+        const weekAgo = new Date(todayDate);
+        weekAgo.setDate(weekAgo.getDate() - 6);
+        const wDay = weekAgo.getDate(), wMonth = weekAgo.getMonth() + 1, wYear = weekAgo.getFullYear();
+
+        const dateFilter = d => {
+          const dDate = new Date(d.year, d.month - 1, d.day);
+          return dDate >= weekAgo && dDate <= todayDate;
+        };
+
+        const prodData = await withTimeout(getProductivityData(dateFilter), 15000);
+        const teams = prodData.teams;
+
+        const dateRange = `${wDay}/${wMonth} - ${today.day}/${today.month}/${today.year}`;
+
+        // Calculate totals per type
+        let totalReguler = { closed: 0, total: 0 };
+        let totalUnspec = { closed: 0, total: 0 };
+        let totalSqm = { closed: 0, total: 0 };
+        let totalManual = { closed: 0 };
+        let grandClosed = 0, grandTotal = 0;
+
+        const teamStats = [];
+        for (const [name, t] of Object.entries(teams)) {
+          const rc = t.reguler.closed.length, ro = t.reguler.open.length;
+          const uc = t.unspec.closed.length, uo = t.unspec.open.length;
+          const sc = t.sqm.closed.length, so = t.sqm.open.length;
+          const mc = t.manual.closed.length;
+          const closed = rc + uc + sc + mc;
+          const total = closed + ro + uo + so;
+          teamStats.push({ name, closed, total, rate: total > 0 ? (closed / total * 100) : 0, rc, ro, uc, uo, sc, so, mc });
+          totalReguler.closed += rc; totalReguler.total += rc + ro;
+          totalUnspec.closed += uc; totalUnspec.total += uc + uo;
+          totalSqm.closed += sc; totalSqm.total += sc + so;
+          totalManual.closed += mc;
+          grandClosed += closed; grandTotal += total;
+        }
+
+        teamStats.sort((a, b) => b.rate - a.rate);
+        const medal = ['🥇', '🥈', '🥉', '🏅'];
+
+        let response = `╔══════════════════════════════════════════╗\n`;
+        response += `║  📊 <b>RINGKASAN PRODUKTIVITAS - 7 HARI</b>\n`;
+        response += `║  📅 ${dateRange}\n`;
+        response += `╠══════════════════════════════════════════╣\n\n`;
+
+        response += `🏆 <b>TEAM RANKING (BY COMPLETION RATE)</b>\n`;
+        teamStats.forEach((ts, idx) => {
+          const m = idx < 4 ? medal[idx] : '▸';
+          response += `├─ ${m} ${ts.name}: ${Math.round(ts.rate)}% (${ts.closed}/${ts.total})\n`;
+        });
+        response += '\n';
+
+        response += `📋 <b>REGULER:</b> ${totalReguler.total} total | ${totalReguler.closed} closed (${totalReguler.total > 0 ? Math.round(totalReguler.closed / totalReguler.total * 100) : 0}%)\n`;
+        response += `   ${buildProgressBar(totalReguler.closed, totalReguler.total, 12)}\n\n`;
+
+        response += `❓ <b>UNSPEC:</b> ${totalUnspec.total} total | ${totalUnspec.closed} closed (${totalUnspec.total > 0 ? Math.round(totalUnspec.closed / totalUnspec.total * 100) : 0}%)\n`;
+        response += `   ${buildProgressBar(totalUnspec.closed, totalUnspec.total, 12)}\n\n`;
+
+        response += `📍 <b>SQM:</b> ${totalSqm.total} total | ${totalSqm.closed} closed (${totalSqm.total > 0 ? Math.round(totalSqm.closed / totalSqm.total * 100) : 0}%)\n`;
+        response += `   ${buildProgressBar(totalSqm.closed, totalSqm.total, 12)}\n\n`;
+
+        response += `🛠 <b>MANUAL GGN:</b> ${totalManual.closed} closed\n\n`;
+
+        response += `📈 <b>TOTAL: ${grandClosed} closed / ${grandTotal} total (${grandTotal > 0 ? Math.round(grandClosed / grandTotal * 100) : 0}%)</b>\n`;
+        response += `   ${buildProgressBar(grandClosed, grandTotal, 12)}\n`;
+        response += `\n╚══════════════════════════════════════════╝`;
+
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /ringkasan_produk Error:', err.message);
+        return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
+      }
+    }
+
+    // ============================================================
+    // /rank_team - Team Ranking
+    // ============================================================
+    else if (/^\/rank_team\b/i.test(text)) {
+      try {
+        const authResult = await checkAuthorization(username, ['ADMIN']);
+        if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
+
+        // Parse period: /rank_team bulan OR /rank_team (default: hari ini)
+        const periodArg = text.replace(/^\/rank_team\s*/i, '').trim().toLowerCase();
+        const today = getTodayJakarta();
+        let dateFilter, periodLabel;
+
+        if (periodArg === 'bulan') {
+          dateFilter = d => d.month === today.month && d.year === today.year;
+          const bulanStr = new Date().toLocaleDateString('id-ID', { month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+          periodLabel = bulanStr;
+        } else if (periodArg === 'tahun') {
+          dateFilter = d => d.year === today.year;
+          periodLabel = `Tahun ${today.year}`;
+        } else {
+          dateFilter = d => d.day === today.day && d.month === today.month && d.year === today.year;
+          periodLabel = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+        }
+
+        const prodData = await withTimeout(getProductivityData(dateFilter), 15000);
+        const teams = prodData.teams;
+
+        const teamStats = [];
+        for (const [name, t] of Object.entries(teams)) {
+          const closed = t.reguler.closed.length + t.unspec.closed.length + t.sqm.closed.length + t.manual.closed.length;
+          const open = t.reguler.open.length + t.unspec.open.length + t.sqm.open.length;
+          const total = closed + open;
+          teamStats.push({ name, closed, open, total, rate: total > 0 ? (closed / total * 100) : 0 });
+        }
+        teamStats.sort((a, b) => b.closed - a.closed);
+
+        const medal = ['🥇', '🥈', '🥉'];
+
+        let response = `╔══════════════════════════════════╗\n`;
+        response += `║  🏆 <b>RANKING TEAM</b>\n`;
+        response += `║  📅 ${periodLabel}\n`;
+        response += `╠══════════════════════════════════╣\n\n`;
+
+        if (teamStats.length === 0) {
+          response += '<i>Belum ada data</i>\n';
+        } else {
+          teamStats.forEach((ts, idx) => {
+            const m = idx < 3 ? medal[idx] : `${idx + 1}.`;
+            response += `${m} <b>${ts.name}</b>\n`;
+            response += `   ${buildProgressBar(ts.closed, ts.total, 12)}\n`;
+            response += `   Closed: ${ts.closed} | Open: ${ts.open} | Total: ${ts.total}\n\n`;
+          });
+
+          const totalClosed = teamStats.reduce((s, t) => s + t.closed, 0);
+          const totalAll = teamStats.reduce((s, t) => s + t.total, 0);
+          response += `📊 <b>Grand Total: ${totalClosed} closed / ${totalAll} total</b>`;
+        }
+
+        response += `\n╚══════════════════════════════════╝`;
+        return sendTelegram(chatId, response, { reply_to_message_id: msgId });
+      } catch (err) {
+        console.error('❌ /rank_team Error:', err.message);
         return sendTelegram(chatId, `❌ Error: ${err.message}`, { reply_to_message_id: msgId });
       }
     }
@@ -1730,50 +2388,37 @@ bot.on('message', async (msg) => {
 /INPUT - Input assurance (auto-close ORDER)
 /SQM - Input SQM (auto-close SQM SA SIGLI)
 /MANUAL - Input gangguan manual
+/unspec - Close tiket UNSPEC
 
 <b>📋 SQM:</b>
-/TICKET_SQM - Lihat & Pick Up tiket SQM Anda
+/TICKET_SQM - Lihat & Pick Up tiket SQM
+
+<b>📊 PRODUKTIVITAS (ADMIN):</b>
+/produktivitas_hari - Produktivitas team
+/detail_team SGI - Detail per team
+/ringkasan_produk - Ringkasan 7 hari
+/rank_team - Ranking team
+/rank_team bulan - Ranking bulan ini
 
 <b>📊 MONITORING (ADMIN):</b>
-/sisa_ticket - Ticket OPEN ORDER ASSURANCE
+/sisa_ticket - Ticket OPEN
 /cek_ttr - Cek TTR warning & expired
 /material_used - Total material
 
-<b>📈 REKAP (ADMIN):</b>
-/rekap_hari - Rekap hari ini
-/rekap_bulan - Rekap bulan ini
+<b>📈 REKAP:</b>
+/rekap_hari | /rekap_bulan | /rekap_tahun
 /REKAP_JANUARI s/d /REKAP_DESEMBER
-/rekap_tahun - Rekap tahun (per bulan)
-/REKAP_MANUAL - Rekap gangguan manual
-/REKAP_SQM - Rekap SQM SA SIGLI
+/REKAP_MANUAL | /REKAP_SQM | /REKAP_UNSPEC
 
-<b>📋 FORMAT /INPUT & /SQM:</b>
-/INPUT INC47052822
-CLOSE: deskripsi perbaikan
-DROPCORE: 0
-PATCHCORD: 0
-SOC: 0
-PSLAVE: 2
-PASSIVE 1/8: 0
-PASSIVE 1/4: 0
-PIGTAIL: 0
-ADAPTOR: 0
-ROSET: 0
-RJ 45: 0
-LAN: 0
-
-<b>📋 FORMAT /MANUAL:</b>
-/MANUAL
+<b>📋 FORMAT /MANUAL & /unspec:</b>
 CLOSE: deskripsi perbaikan
 SERVICE NO: 111149103305
 WORKZONE: SLG
 
 <b>⚙️ FITUR OTOMATIS:</b>
-• Auto-fill teknisi berdasarkan workzone
-• TTR monitoring & alert ke group
-• Auto-close status saat /INPUT
-• Deteksi gangguan berulang (GAUL)
-• Auto-post sisa ticket (1 jam)`;
+• Auto-fill teknisi & TTR monitoring
+• Auto-close & deteksi GAUL
+• Weekday=TEAM | Weekend=PIKET`;
 
         return sendTelegram(chatId, helpMsg, { reply_to_message_id: msgId });
       } catch (err) {
