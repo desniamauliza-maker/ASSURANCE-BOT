@@ -479,6 +479,25 @@ function resolveTeamName(workzone, mappings, teamConfig) {
   return workzone ? `TEAM ${workzone.toUpperCase()}` : 'UNKNOWN';
 }
 
+// === HELPER: Resolve team name from TEKNISI username directly ===
+function resolveTeamByTeknisi(teknisiStr, teamConfig) {
+  if (!teknisiStr) return 'UNKNOWN';
+  const usernames = teknisiStr.split(/[&,]/).map(u => u.replace('@', '').trim().toLowerCase());
+  for (const u of usernames) {
+    const sektor = teamConfig.get(u);
+    if (sektor && sektor !== 'ALL' && sektor !== 'LTM') return getTeamDisplayName(sektor);
+  }
+  for (const u of usernames) {
+    if (!u) continue;
+    for (const [key, sektor] of teamConfig.entries()) {
+      if (sektor && sektor !== 'ALL' && sektor !== 'LTM') {
+        if (key.includes(u) || u.includes(key)) return getTeamDisplayName(sektor);
+      }
+    }
+  }
+  return 'UNKNOWN';
+}
+
 // === HELPER: Parse piket date (dd.mm.yyyy) ===
 function parsePiketDate(dateStr) {
   if (!dateStr) return null;
@@ -487,7 +506,7 @@ function parsePiketDate(dateStr) {
   return { day: parseInt(parts[0]), month: parseInt(parts[1]), year: parseInt(parts[2]) };
 }
 
-// === HELPER: Get today's piket teknisi ===
+// === HELPER: Get today's piket teknisi ===// === HELPER: Get today's piket teknisi ===
 function getTodayPiket(piketSchedule) {
   const today = getTodayJakarta();
   return piketSchedule.filter(p => {
@@ -1298,10 +1317,8 @@ bot.on('message', async (msg) => {
         const dateFilter = d => d.day === today.day && d.month === today.month && d.year === today.year;
         const prodData = await withTimeout(getProductivityData(dateFilter), 15000);
         const { teams } = prodData;
-
         const now = new Date();
         const todayStr = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
-
         let grandClosed = 0, grandOpen = 0, grandGaul = 0;
         const teamStats = [];
         for (const [name, t] of Object.entries(teams)) {
@@ -1312,13 +1329,11 @@ bot.on('message', async (msg) => {
           teamStats.push({ name, closed, open, t });
         }
         teamStats.sort((a, b) => b.closed - a.closed);
-
         const medal = ['🥇', '🥈', '🥉'];
         let response = `╔══════════════════════════════════╗\n`;
         response += `║  📊 <b>REKAP CLOSE - HARI INI</b>\n`;
         response += `║  📅 ${todayStr}\n`;
         response += `╠══════════════════════════════════╣\n\n`;
-
         if (teamStats.length === 0) {
           response += '<i>Belum ada data hari ini</i>\n';
         } else {
@@ -1333,7 +1348,6 @@ bot.on('message', async (msg) => {
           if (grandGaul > 0) response += `🔄 GAUL: ${grandGaul} detected\n`;
         }
         response += `╚══════════════════════════════════╝`;
-
         return sendTelegram(chatId, response, { reply_to_message_id: msgId });
       } catch (err) {
         console.error('❌ /rekap_hari Error:', err.message);
