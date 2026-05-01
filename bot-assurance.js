@@ -544,13 +544,13 @@ async function getProductivityData(dateFilterFn) {
   if (orderData && orderCols) {
     for (let i = 1; i < orderData.length; i++) {
       const incident = (orderData[i][orderCols.incident] || '').trim();
-      const workzone = (orderData[i][orderCols.workzone] || '').trim();
+      const teknisi = (orderData[i][orderCols.teknisi] || '').trim();
       const status = (orderData[i][orderCols.status] || '').toUpperCase().trim();
       const custType = (orderData[i][orderCols.customerType] || '').trim();
       const ttrStr = (orderData[i][orderCols.ttrCustomer] || '').trim();
       if (!incident) continue;
 
-      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      const teamName = resolveTeamByTeknisi(teknisi, teamConfig);
       ensureTeam(teamName);
 
       if (closedIncidents.has(incident.toUpperCase())) {
@@ -565,13 +565,13 @@ async function getProductivityData(dateFilterFn) {
   if (unspecData) {
     for (let i = 1; i < unspecData.length; i++) {
       const tanggal = (unspecData[i][0] || '').trim();
-      const workzone = (unspecData[i][4] || '').trim();
+      const teknisi = (unspecData[i][2] || '').trim();
       const serviceNo = (unspecData[i][7] || '').trim();
       const deviceName = (unspecData[i][8] || '').trim();
       const status = (unspecData[i][9] || '').toUpperCase().trim();
       const d = parseIndonesianDate(tanggal);
 
-      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      const teamName = resolveTeamByTeknisi(teknisi, teamConfig);
       ensureTeam(teamName);
 
       if (status === 'CLOSE' && d && dateFilterFn(d)) {
@@ -587,11 +587,11 @@ async function getProductivityData(dateFilterFn) {
     for (let i = 1; i < sqmData.length; i++) {
       const tanggal = (sqmData[i][0] || '').trim();
       const incident = (sqmData[i][1] || '').trim();
-      const workzone = (sqmData[i][4] || '').trim();
+      const teknisi = (sqmData[i][2] || '').trim();
       const status = (sqmData[i][9] || '').toUpperCase().trim();
       const d = parseIndonesianDate(tanggal);
 
-      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      const teamName = resolveTeamByTeknisi(teknisi, teamConfig);
       ensureTeam(teamName);
 
       if (status === 'CLOSE' && d && dateFilterFn(d)) {
@@ -606,12 +606,12 @@ async function getProductivityData(dateFilterFn) {
   if (manualData) {
     for (let i = 1; i < manualData.length; i++) {
       const tanggal = (manualData[i][0] || '').trim();
+      const teknisi = (manualData[i][1] || '').trim();
       const serviceNo = (manualData[i][4] || '').trim();
-      const workzone = (manualData[i][3] || '').trim();
       const d = parseIndonesianDate(tanggal);
       if (!d || !dateFilterFn(d)) continue;
 
-      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      const teamName = resolveTeamByTeknisi(teknisi, teamConfig);
       ensureTeam(teamName);
       result[teamName].manual.closed.push({ serviceNo, tanggal });
     }
@@ -622,11 +622,11 @@ async function getProductivityData(dateFilterFn) {
     for (let i = 1; i < gaulData.length; i++) {
       const tanggal = (gaulData[i][0] || '').trim();
       const incident = (gaulData[i][1] || '').trim();
-      const workzone = (gaulData[i][3] || '').trim();
+      const teknisi = (gaulData[i][2] || '').trim();
       const d = parseIndonesianDate(tanggal);
       if (!d) continue;
 
-      const teamName = resolveTeamName(workzone, mappings, teamConfig);
+      const teamName = resolveTeamByTeknisi(teknisi, teamConfig);
       ensureTeam(teamName);
 
       if (dateFilterFn(d)) {
