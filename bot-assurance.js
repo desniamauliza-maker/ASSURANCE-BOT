@@ -1294,55 +1294,45 @@ bot.on('message', async (msg) => {
         if (!authResult.authorized) return sendTelegram(chatId, authResult.message, { reply_to_message_id: msgId });
 
         const isAdmin = authResult.role === 'ADMIN';
-        const data = await withTimeout(getSheetData(ASSURANCE_SHEET), 10000);
-        const orderData = await withTimeout(getSheetData(ORDER_ASSURANCE_SHEET), 10000);
         const today = getTodayJakarta();
-        let map = {};
-        let incidents = [];
-
-        for (let i = 1; i < data.length; i++) {
-          const tanggal = (data[i][0] || '').trim();
-          const teknisi = (data[i][14] || '-').trim();
-          const incident = (data[i][1] || '').trim();
-          const d = parseIndonesianDate(tanggal);
-          if (!d) continue;
-          if (d.day === today.day && d.month === today.month && d.year === today.year) {
-            // Filter: user hanya lihat milik sendiri
-            if (!isAdmin && !teknisi.toLowerCase().includes(username.toLowerCase())) continue;
-            map[teknisi] = (map[teknisi] || 0) + 1;
-            if (incident) incidents.push(incident.toUpperCase());
-          }
-        }
-
-        // Hitung COMPLY/NOT COMPLY dari ORDER ASSURANCE kolom R
-        let comply = 0, notComply = 0;
-        for (let i = 1; i < orderData.length; i++) {
-          const inc = (orderData[i][1] || '').trim().toUpperCase();
-          const kawal = (orderData[i][17] || '').trim().toUpperCase();
-          if (incidents.includes(inc)) {
-            if (kawal === 'COMPLY') comply++;
-            else if (kawal === 'NOT COMPLY') notComply++;
-          }
-        }
+        const dateFilter = d => d.day === today.day && d.month === today.month && d.year === today.year;
+        const prodData = await withTimeout(getProductivityData(dateFilter), 15000);
+        const { teams } = prodData;
 
         const now = new Date();
         const todayStr = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
-        const entries = Object.entries(map).sort((a, b) => b[1] - a[1]);
-        const total = entries.reduce((sum, [_, c]) => sum + c, 0);
+
+        let grandClosed = 0, grandOpen = 0, grandGaul = 0;
+        const teamStats = [];
+        for (const [name, t] of Object.entries(teams)) {
+          if (name === 'UNKNOWN') continue;
+          const closed = t.reguler.closed.length + t.unspec.closed.length + t.sqm.closed.length + t.manual.closed.length;
+          const open = t.reguler.open.length + t.unspec.open.length + t.sqm.open.length;
+          grandClosed += closed; grandOpen += open; grandGaul += t.gaul.closed.length;
+          teamStats.push({ name, closed, open, t });
+        }
+        teamStats.sort((a, b) => b.closed - a.closed);
 
         const medal = ['🥇', '🥈', '🥉'];
-        let header = isAdmin ? 'REKAP CLOSE - HARI INI' : `REKAP CLOSE - @${username}`;
-        let response = `━━━━━━━━━━━━━━━━━━━━━━\n📊 <b>${header}</b>\n📅 ${todayStr}\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-        if (entries.length === 0) {
-          response += '<i>Belum ada data hari ini</i>';
+        let response = `╔══════════════════════════════════╗\n`;
+        response += `║  📊 <b>REKAP CLOSE - HARI INI</b>\n`;
+        response += `║  📅 ${todayStr}\n`;
+        response += `╠══════════════════════════════════╣\n\n`;
+
+        if (teamStats.length === 0) {
+          response += '<i>Belum ada data hari ini</i>\n';
         } else {
-          entries.forEach(([tek, c], i) => {
+          teamStats.forEach((ts, i) => {
             const icon = i < 3 ? medal[i] : '🔸';
-            response += `${icon} <b>${tek}</b> : ${c} tickets\n`;
+            response += `${icon} <b>${ts.name}</b>: ${ts.closed} closed\n`;
+            response += `   📋 REG:${ts.t.reguler.closed.length} ❓ UNS:${ts.t.unspec.closed.length} 📍 SQM:${ts.t.sqm.closed.length} 🛠 MAN:${ts.t.manual.closed.length}\n`;
+            if (ts.t.gaul.closed.length > 0) response += `   🔄 GAUL: ${ts.t.gaul.closed.length} detected\n`;
+            response += '\n';
           });
-          response += `\n📋 <b>Total: ${total} tickets</b>\n`;
-          response += `✅ COMPLY: ${comply} | ❌ NOT COMPLY: ${notComply}`;
+          response += `📋 <b>Total: ${grandClosed} closed | ${grandOpen} open</b>\n`;
+          if (grandGaul > 0) response += `🔄 GAUL: ${grandGaul} detected\n`;
         }
+        response += `╚══════════════════════════════════╝`;
 
         return sendTelegram(chatId, response, { reply_to_message_id: msgId });
       } catch (err) {
